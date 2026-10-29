@@ -1,0 +1,91 @@
+rules_version = '2';
+
+// security rules for the TPMentorship Part 3 database
+// every rule requires the user to be logged in (request.auth != null),
+// and most also check the document belongs to the logged in user
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // mentors: any logged in user can browse them
+    // write is allowed so the app's one-time seedMentorsIfEmpty() can run
+    // (see lib/services/mentor_service.dart)
+    match /mentors/{mentorId} {
+      allow read: if request.auth != null;
+      allow write: if request.auth != null;
+    }
+
+    // users: everyone can only read/write their OWN profile document
+    // (the document id is always the user's own auth uid)
+    match /users/{uid} {
+      allow read, write: if request.auth != null && request.auth.uid == uid;
+    }
+
+    // appointments: any logged in user can read (needed for the mentor
+    // profile's "N Sessions" badge, which counts *any* mentor's completed
+    // sessions - a query filtered by mentorId, not studentId, so a rule
+    // scoped to "only the owning student" can never be satisfied by that
+    // query and Firestore rejects it outright with PERMISSION_DENIED).
+    // create requires the new document's studentId to match the caller,
+    // so no one can book a session pretending to be someone else.
+    //
+    // update is allowed for the owning student OR the mentor the session
+    // was booked with - the mentor needs it for the Accept / Reject
+    // buttons on their Session Requests list. without the mentorId arm
+    // every accept fails with PERMISSION_DENIED.
+    //
+    // known tradeoff: this lets a mentor write any field on a session
+    // they are the mentor for, not just status. AppointmentService only
+    // ever sends {'status': ...} from the mentor path (updateStatus), so
+    // the app never abuses it, but the rule itself is not that strict.
+    //
+    // delete stays locked to the student who owns the session
+    match /appointments/{appointmentId} {
+      allow read: if request.auth != null;
+      allow create: if request.auth != null
+                    && request.resource.data.studentId == request.auth.uid;
+      allow update: if request.auth != null
+                    && (resource.data.studentId == request.auth.uid
+                        || resource.data.mentorId == request.auth.uid);
+      allow delete: if request.auth != null
+                    && resource.data.studentId == request.auth.uid;
+    }
+
+    // students: a browse directory for mentors looking for mentees
+    // (seed/demo data, not linked to real accounts) - same open pattern
+    // as mentors, so the one-time seedStudentsIfEmpty() can run
+    match /students/{studentId} {
+      allow read: if request.auth != null;
+      allow write: if request.auth != null;
+    }
+
+    // reviews: anyone logged in can read them (they're public feedback on
+    // a mentor), but a review can only be created by the student who
+    // wrote it, and is never edited or deleted once posted
+    match /reviews/{reviewId} {
+      allow read: if request.auth != null;
+      allow create: if request.auth != null
+                    && request.resource.data.studentId == request.auth.uid;
+    }
+
+    // conversations: a 1:1 chat between two users. you can only read or
+    // write a conversation you are a participant in. the messages live in
+    // a subcollection - you can read them if you're in the parent
+    // conversation, and can only send a message as yourself
+    match /conversations/{conversationId} {
+      allow read: if request.auth != null
+                  && request.auth.uid in resource.data.participants;
+      allow create: if request.auth != null
+                  && request.auth.uid in request.resource.data.participants;
+      allow update: if request.auth != null
+                  && request.auth.uid in resource.data.participants;
+
+      match /messages/{messageId} {
+        allow read: if request.auth != null
+            && request.auth.uid in
+               get(/databases/$(database)/documents/conversations/$(conversationId)).data.participants;
+        allow create: if request.auth != null
+            && request.resource.data.senderId == request.auth.uid;
+      }
+    }
+  }
+}
